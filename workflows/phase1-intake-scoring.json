@@ -1,0 +1,101 @@
+{
+  "name": "Inbound Lead Engine - Phase 1 (Intake & Scoring)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1f0c3e2-0001-4b6a-9c1d-000000000001",
+      "name": "Inbound Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "b7c2d9e4-1111-4a2b-8c3d-0000000000aa"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize & validate: clean up raw form data into a consistent lead record.\nconst PERSONAL_DOMAINS = [\n  'gmail.com', 'googlemail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',\n  'live.com', 'icloud.com', 'aol.com', 'proton.me', 'protonmail.com',\n  'gmx.de', 'gmx.net', 'web.de', 't-online.de'\n];\nconst clean = (v) => String(v ?? '').trim();\n\nreturn $input.all().map((item) => {\n  const b = item.json.body ?? item.json; // webhook puts form data in \"body\"\n  const email = clean(b.email).toLowerCase();\n  const emailValid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n  const domain = emailValid ? email.split('@')[1] : null;\n\n  return {\n    json: {\n      email,\n      email_valid: emailValid,\n      domain,\n      is_personal_email: domain ? PERSONAL_DOMAINS.includes(domain) : false,\n      first_name: clean(b.first_name),\n      last_name: clean(b.last_name),\n      job_title: clean(b.job_title),\n      company: clean(b.company),\n      company_size: clean(b.company_size) || 'unknown',\n      industry: clean(b.industry) || 'unknown',\n      use_case: clean(b.use_case),\n      timeline: clean(b.timeline) || 'unknown',\n      source: clean(b.source) || 'website_form',\n      received_at: new Date().toISOString(),\n    },\n  };\n});\n"
+      },
+      "id": "a1f0c3e2-0002-4b6a-9c1d-000000000002",
+      "name": "Normalize & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Score lead: fit (who they are, max 60) + intent (what they want, max 40).\n// Every point is logged in score_breakdown so sales can see WHY a lead scored as it did.\nconst SIZE_POINTS = { '5000+': 25, '1001-5000': 20, '201-1000': 12, '51-200': 6, '1-50': 2 };\nconst PRIORITY_INDUSTRIES = [\n  'financial services', 'insurance', 'healthcare & pharma', 'manufacturing',\n  'retail & e-commerce', 'energy & utilities', 'telecommunications'\n];\nconst USE_CASE_SIGNALS = {\n  'prediction task': /predict|forecast|classif|regression|estimat/,\n  'known tabular use case': /churn|fraud|risk|credit|demand|pricing|maintenance|claims|default/,\n  'tabular data': /tabular|table|spreadsheet|rows|csv|structured data|features/,\n  'current ML stack': /xgboost|gradient boost|lightgbm|catboost|automl|random forest/,\n};\nconst TIMELINE_POINTS = { 'within 3 months': 15, '3-6 months': 8, 'exploring': 2 };\n\nreturn $input.all().map((item) => {\n  const lead = item.json;\n  const breakdown = [];\n  let fit = 0, intent = 0;\n\n  if (!lead.email_valid) {\n    return { json: { ...lead, score: 0, tier: 'invalid', score_breakdown: ['invalid email'] } };\n  }\n\n  // --- Fit ---\n  const sizePts = SIZE_POINTS[lead.company_size] ?? 0;\n  fit += sizePts; breakdown.push(`+${sizePts} company size (${lead.company_size})`);\n\n  const industry = lead.industry.toLowerCase();\n  const indPts = PRIORITY_INDUSTRIES.includes(industry) ? 15 : industry === 'unknown' ? 0 : 5;\n  fit += indPts; breakdown.push(`+${indPts} industry (${lead.industry})`);\n\n  const title = lead.job_title.toLowerCase();\n  if (/head|director|vp|vice president|chief|cdo|cto|lead|principal/.test(title)) {\n    fit += 10; breakdown.push('+10 senior role');\n  }\n  if (/data|machine learning|\\bml\\b|analytics|\\bai\\b|scientist|quant/.test(title)) {\n    fit += 10; breakdown.push('+10 data/ML role');\n  }\n\n  // --- Intent ---\n  const useCase = lead.use_case.toLowerCase();\n  if (useCase.length >= 20) {\n    for (const [label, pattern] of Object.entries(USE_CASE_SIGNALS)) {\n      if (pattern.test(useCase)) { intent += 6; breakdown.push(`+6 ${label}`); }\n    }\n    intent = Math.min(intent, 25);\n  } else {\n    breakdown.push('+0 use case too short to assess');\n  }\n  const tlPts = TIMELINE_POINTS[lead.timeline.toLowerCase()] ?? 0;\n  intent += tlPts; breakdown.push(`+${tlPts} timeline (${lead.timeline})`);\n\n  // --- Penalties ---\n  let score = fit + intent;\n  if (lead.is_personal_email) { score -= 15; breakdown.push('-15 personal email domain'); }\n  score = Math.max(0, Math.min(100, score));\n\n  const tier = score >= 75 ? 'hot' : score >= 35 ? 'warm' : 'cold';\n  return { json: { ...lead, fit_score: fit, intent_score: intent, score, tier, score_breakdown: breakdown } };\n});\n"
+      },
+      "id": "a1f0c3e2-0003-4b6a-9c1d-000000000003",
+      "name": "Score Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "a1f0c3e2-0004-4b6a-9c1d-000000000004",
+      "name": "Respond with Score",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        720,
+        0
+      ]
+    }
+  ],
+  "connections": {
+    "Inbound Lead Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Validate": {
+      "main": [
+        [
+          {
+            "node": "Score Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Lead": {
+      "main": [
+        [
+          {
+            "node": "Respond with Score",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {}
+}
