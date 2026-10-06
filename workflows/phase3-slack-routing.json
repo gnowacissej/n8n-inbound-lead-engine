@@ -63,7 +63,8 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "strict",
+            "version": 1
           },
           "conditions": [
             {
@@ -93,8 +94,8 @@
       "parameters": {
         "method": "POST",
         "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "hubspotAppToken",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: $json.email }] }], properties: ['email', 'lead_score', 'lead_tier'], limit: 1 }) }}",
@@ -106,8 +107,14 @@
       "typeVersion": 4.2,
       "position": [
         1200,
-        -120
-      ]
+        -128
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
     },
     {
       "parameters": {
@@ -115,7 +122,8 @@
           "options": {
             "caseSensitive": true,
             "leftValue": "",
-            "typeValidation": "strict"
+            "typeValidation": "strict",
+            "version": 1
           },
           "conditions": [
             {
@@ -138,15 +146,15 @@
       "typeVersion": 2,
       "position": [
         1440,
-        -120
+        -128
       ]
     },
     {
       "parameters": {
         "method": "PATCH",
         "url": "=https://api.hubapi.com/crm/v3/objects/contacts/{{ $json.results[0].id }}",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "hubspotAppToken",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ properties: $('Build HubSpot Properties').first().json.hubspot_properties }) }}",
@@ -159,14 +167,20 @@
       "position": [
         1680,
         -240
-      ]
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
     },
     {
       "parameters": {
         "method": "POST",
         "url": "https://api.hubapi.com/crm/v3/objects/contacts",
-        "authentication": "predefinedCredentialType",
-        "nodeCredentialType": "hubspotAppToken",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "sendBody": true,
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify({ properties: $('Build HubSpot Properties').first().json.hubspot_properties }) }}",
@@ -179,7 +193,13 @@
       "position": [
         1680,
         0
-      ]
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
     },
     {
       "parameters": {
@@ -196,7 +216,6 @@
     },
     {
       "parameters": {
-        "respondWith": "firstIncomingItem",
         "options": {}
       },
       "id": "a1f0c3e2-0004-4b6a-9c1d-000000000004",
@@ -205,12 +224,12 @@
       "typeVersion": 1.1,
       "position": [
         2160,
-        -120
+        -128
       ]
     },
     {
       "parameters": {
-        "jsCode": "// Build the Slack message for hot and warm leads.\n// Find your Hub ID in HubSpot (account menu, top right) and paste it below to get a working \"Open in HubSpot\" link.\nconst PORTAL_ID = 'YOUR_HUBSPOT_PORTAL_ID';\n\nconst l = $input.first().json;\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst name = esc(`${l.first_name} ${l.last_name}`.trim() || l.email);\nconst where = esc([l.job_title, l.company].filter(Boolean).join(' @ '));\nconst hasLink = l.hubspot?.contact_id && PORTAL_ID !== 'YOUR_HUBSPOT_PORTAL_ID';\nconst link = hasLink\n  ? `\\n<https://app.hubspot.com/contacts/${PORTAL_ID}/record/0-1/${l.hubspot.contact_id}|Open in HubSpot>`\n  : '';\n\nlet text = '';\nif (l.tier === 'hot') {\n  const reasons = (l.score_breakdown || []).map((r) => `• ${esc(r)}`).join('\\n');\n  const useCase = esc(l.use_case).slice(0, 300);\n  text =\n    `:fire: *HOT lead: ${name}*${where ? `, ${where}` : ''}\\n` +\n    `*Score:* ${l.score}/100 (fit ${l.fit_score}, intent ${l.intent_score})\\n` +\n    `*Use case:* ${useCase || 'not provided'}\\n` +\n    `*Why it scored this way:*\\n${reasons}` +\n    link;\n} else if (l.tier === 'warm') {\n  text =\n    `:sunny: Warm lead: *${name}*${where ? `, ${where}` : ''}. ` +\n    `Score ${l.score}/100.${link}`;\n}\nreturn [{ json: { ...l, slack_text: text } }];\n"
+        "jsCode": "// Build the Slack message for hot and warm leads.\n// Find your Hub ID in HubSpot (account menu, top right) and paste it below to get a working \"Open in HubSpot\" link.\nconst PORTAL_ID = '149491548';\n\nconst l = $input.first().json;\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst name = esc(`${l.first_name} ${l.last_name}`.trim() || l.email);\nconst where = esc([l.job_title, l.company].filter(Boolean).join(' @ '));\nconst hasLink = l.hubspot?.contact_id && PORTAL_ID !== 'YOUR_HUBSPOT_PORTAL_ID';\nconst link = hasLink\n  ? `\\n<https://app.hubspot.com/contacts/${PORTAL_ID}/record/0-1/${l.hubspot.contact_id}|Open in HubSpot>`\n  : '';\n\nlet text = '';\nif (l.tier === 'hot') {\n  const reasons = (l.score_breakdown || []).map((r) => `• ${esc(r)}`).join('\\n');\n  const useCase = esc(l.use_case).slice(0, 300);\n  text =\n    `:fire: *HOT lead: ${name}*${where ? `, ${where}` : ''}\\n` +\n    `*Score:* ${l.score}/100 (fit ${l.fit_score}, intent ${l.intent_score})\\n` +\n    `*Use case:* ${useCase || 'not provided'}\\n` +\n    `*Why it scored this way:*\\n${reasons}` +\n    link;\n} else if (l.tier === 'warm') {\n  text =\n    `:sunny: Warm lead: *${name}*${where ? `, ${where}` : ''}. ` +\n    `Score ${l.score}/100.${link}`;\n}\nreturn [{ json: { ...l, slack_text: text } }];\n"
       },
       "id": "a3f0c3e2-0012-4b6a-9c1d-000000000012",
       "name": "Format Slack Message",
@@ -218,7 +237,7 @@
       "typeVersion": 2,
       "position": [
         2160,
-        120
+        128
       ]
     },
     {
@@ -230,7 +249,8 @@
                 "options": {
                   "caseSensitive": true,
                   "leftValue": "",
-                  "typeValidation": "strict"
+                  "typeValidation": "strict",
+                  "version": 1
                 },
                 "conditions": [
                   {
@@ -253,7 +273,8 @@
                 "options": {
                   "caseSensitive": true,
                   "leftValue": "",
-                  "typeValidation": "strict"
+                  "typeValidation": "strict",
+                  "version": 1
                 },
                 "conditions": [
                   {
@@ -281,7 +302,7 @@
       "typeVersion": 3.2,
       "position": [
         2400,
-        120
+        128
       ]
     },
     {
@@ -289,8 +310,9 @@
         "select": "channel",
         "channelId": {
           "__rl": true,
-          "value": "",
-          "mode": "list"
+          "value": "C0C721MR10S",
+          "mode": "list",
+          "cachedResultName": "hot-leads"
         },
         "text": "={{ $json.slack_text }}",
         "otherOptions": {
@@ -303,16 +325,24 @@
       "typeVersion": 2.3,
       "position": [
         2640,
-        20
-      ]
+        32
+      ],
+      "webhookId": "9b551834-2791-4c31-960c-fc336a3a349e",
+      "credentials": {
+        "slackApi": {
+          "id": "uNUXOqcWUiABrYoF",
+          "name": "Slack account"
+        }
+      }
     },
     {
       "parameters": {
         "select": "channel",
         "channelId": {
           "__rl": true,
-          "value": "",
-          "mode": "list"
+          "value": "C0C7XNJ2DJ4",
+          "mode": "list",
+          "cachedResultName": "warm-leads"
         },
         "text": "={{ $json.slack_text }}",
         "otherOptions": {
@@ -325,10 +355,18 @@
       "typeVersion": 2.3,
       "position": [
         2640,
-        220
-      ]
+        224
+      ],
+      "webhookId": "39b4285f-115a-4b7a-8fe3-8bf623f2b58e",
+      "credentials": {
+        "slackApi": {
+          "id": "uNUXOqcWUiABrYoF",
+          "name": "Slack account"
+        }
+      }
     }
   ],
+  "pinData": {},
   "connections": {
     "Inbound Lead Webhook": {
       "main": [
@@ -489,9 +527,17 @@
       ]
     }
   },
+  "active": true,
   "settings": {
-    "executionOrder": "v1"
+    "executionOrder": "v1",
+    "binaryMode": "separate"
   },
-  "pinData": {},
-  "id": "p3SlackRouting001"
+  "versionId": "718c34ad-44d1-4462-b80b-263c063eef08",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "89a948a4c107fa51e58435967ab0503e5a14261df1508043aff8bd085b8d140c"
+  },
+  "nodeGroups": [],
+  "id": "p3SlackRouting001",
+  "tags": []
 }
