@@ -1,0 +1,497 @@
+{
+  "name": "Inbound Lead Engine - Phase 3 (Slack Routing)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-lead",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "a1f0c3e2-0001-4b6a-9c1d-000000000001",
+      "name": "Inbound Lead Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "b7c2d9e4-3333-4a2b-8c3d-0000000000cc"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalize & validate: clean up raw form data into a consistent lead record.\nconst PERSONAL_DOMAINS = [\n  'gmail.com', 'googlemail.com', 'yahoo.com', 'hotmail.com', 'outlook.com',\n  'live.com', 'icloud.com', 'aol.com', 'proton.me', 'protonmail.com',\n  'gmx.de', 'gmx.net', 'web.de', 't-online.de'\n];\nconst clean = (v) => String(v ?? '').trim();\n\nreturn $input.all().map((item) => {\n  const b = item.json.body ?? item.json; // webhook puts form data in \"body\"\n  const email = clean(b.email).toLowerCase();\n  const emailValid = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email);\n  const domain = emailValid ? email.split('@')[1] : null;\n\n  return {\n    json: {\n      email,\n      email_valid: emailValid,\n      domain,\n      is_personal_email: domain ? PERSONAL_DOMAINS.includes(domain) : false,\n      first_name: clean(b.first_name),\n      last_name: clean(b.last_name),\n      job_title: clean(b.job_title),\n      company: clean(b.company),\n      company_size: clean(b.company_size) || 'unknown',\n      industry: clean(b.industry) || 'unknown',\n      use_case: clean(b.use_case),\n      timeline: clean(b.timeline) || 'unknown',\n      source: clean(b.source) || 'website_form',\n      received_at: new Date().toISOString(),\n    },\n  };\n});\n"
+      },
+      "id": "a1f0c3e2-0002-4b6a-9c1d-000000000002",
+      "name": "Normalize & Validate",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Score lead: fit (who they are, max 60) + intent (what they want, max 40).\n// Every point is logged in score_breakdown so sales can see WHY a lead scored as it did.\nconst SIZE_POINTS = { '5000+': 25, '1001-5000': 20, '201-1000': 12, '51-200': 6, '1-50': 2 };\nconst PRIORITY_INDUSTRIES = [\n  'financial services', 'insurance', 'healthcare & pharma', 'manufacturing',\n  'retail & e-commerce', 'energy & utilities', 'telecommunications'\n];\nconst USE_CASE_SIGNALS = {\n  'prediction task': /predict|forecast|classif|regression|estimat/,\n  'known tabular use case': /churn|fraud|risk|credit|demand|pricing|maintenance|claims|default/,\n  'tabular data': /tabular|table|spreadsheet|rows|csv|structured data|features/,\n  'current ML stack': /xgboost|gradient boost|lightgbm|catboost|automl|random forest/,\n};\nconst TIMELINE_POINTS = { 'within 3 months': 15, '3-6 months': 8, 'exploring': 2 };\n\nreturn $input.all().map((item) => {\n  const lead = item.json;\n  const breakdown = [];\n  let fit = 0, intent = 0;\n\n  if (!lead.email_valid) {\n    return { json: { ...lead, score: 0, tier: 'invalid', score_breakdown: ['invalid email'] } };\n  }\n\n  // --- Fit ---\n  const sizePts = SIZE_POINTS[lead.company_size] ?? 0;\n  fit += sizePts; breakdown.push(`+${sizePts} company size (${lead.company_size})`);\n\n  const industry = lead.industry.toLowerCase();\n  const indPts = PRIORITY_INDUSTRIES.includes(industry) ? 15 : industry === 'unknown' ? 0 : 5;\n  fit += indPts; breakdown.push(`+${indPts} industry (${lead.industry})`);\n\n  const title = lead.job_title.toLowerCase();\n  if (/head|director|vp|vice president|chief|cdo|cto|lead|principal/.test(title)) {\n    fit += 10; breakdown.push('+10 senior role');\n  }\n  if (/data|machine learning|\\bml\\b|analytics|\\bai\\b|scientist|quant/.test(title)) {\n    fit += 10; breakdown.push('+10 data/ML role');\n  }\n\n  // --- Intent ---\n  const useCase = lead.use_case.toLowerCase();\n  if (useCase.length >= 20) {\n    for (const [label, pattern] of Object.entries(USE_CASE_SIGNALS)) {\n      if (pattern.test(useCase)) { intent += 6; breakdown.push(`+6 ${label}`); }\n    }\n    intent = Math.min(intent, 25);\n  } else {\n    breakdown.push('+0 use case too short to assess');\n  }\n  const tlPts = TIMELINE_POINTS[lead.timeline.toLowerCase()] ?? 0;\n  intent += tlPts; breakdown.push(`+${tlPts} timeline (${lead.timeline})`);\n\n  // --- Penalties ---\n  let score = fit + intent;\n  if (lead.is_personal_email) { score -= 15; breakdown.push('-15 personal email domain'); }\n  score = Math.max(0, Math.min(100, score));\n\n  const tier = score >= 75 ? 'hot' : score >= 35 ? 'warm' : 'cold';\n  return { json: { ...lead, fit_score: fit, intent_score: intent, score, tier, score_breakdown: breakdown } };\n});\n"
+      },
+      "id": "a1f0c3e2-0003-4b6a-9c1d-000000000003",
+      "name": "Score Lead",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Map the scored lead onto HubSpot property names.\n// Empty values are dropped so a sparse resubmission never blanks out data already in HubSpot.\nreturn $input.all().map((item) => {\n  const l = item.json;\n  const raw = {\n    email: l.email,\n    firstname: l.first_name,\n    lastname: l.last_name,\n    jobtitle: l.job_title,\n    company: l.company,\n    lead_score: String(l.score),\n    lead_tier: l.tier,\n    score_breakdown: (l.score_breakdown || []).join('\\n'),\n    lead_source_form: l.source,\n  };\n  const props = Object.fromEntries(\n    Object.entries(raw).filter(([, v]) => v !== '' && v !== null && v !== undefined)\n  );\n  return { json: { ...l, hubspot_properties: props } };\n});\n"
+      },
+      "id": "a2f0c3e2-0005-4b6a-9c1d-000000000005",
+      "name": "Build HubSpot Properties",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        720,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "a2f0c3e2-0006-4b6a-9c1d-111111110006",
+              "leftValue": "={{ $json.tier }}",
+              "rightValue": "invalid",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a2f0c3e2-0006-4b6a-9c1d-000000000006",
+      "name": "Valid Email?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        960,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'email', operator: 'EQ', value: $json.email }] }], properties: ['email', 'lead_score', 'lead_tier'], limit: 1 }) }}",
+        "options": {}
+      },
+      "id": "a2f0c3e2-0007-4b6a-9c1d-000000000007",
+      "name": "Search Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1200,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "a2f0c3e2-0008-4b6a-9c1d-111111110008",
+              "leftValue": "={{ $json.total }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "a2f0c3e2-0008-4b6a-9c1d-000000000008",
+      "name": "Contact Exists?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        1440,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "method": "PATCH",
+        "url": "=https://api.hubapi.com/crm/v3/objects/contacts/{{ $json.results[0].id }}",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Build HubSpot Properties').first().json.hubspot_properties }) }}",
+        "options": {}
+      },
+      "id": "a2f0c3e2-0009-4b6a-9c1d-000000000009",
+      "name": "Update Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        -240
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "hubspotAppToken",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ properties: $('Build HubSpot Properties').first().json.hubspot_properties }) }}",
+        "options": {}
+      },
+      "id": "a2f0c3e2-0010-4b6a-9c1d-000000000010",
+      "name": "Create Contact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1680,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Final response for the webhook caller: the scored lead plus what happened in HubSpot.\nconst lead = $('Score Lead').first().json;\nlet hubspot = { action: 'skipped', reason: 'invalid email' };\n\nif (lead.tier !== 'invalid') {\n  const search = $('Search Contact').first().json;\n  hubspot = {\n    action: search.total > 0 ? 'updated' : 'created',\n    contact_id: $input.first().json.id,\n  };\n}\nreturn [{ json: { ...lead, hubspot } }];\n"
+      },
+      "id": "a2f0c3e2-0011-4b6a-9c1d-000000000011",
+      "name": "Build Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1920,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "firstIncomingItem",
+        "options": {}
+      },
+      "id": "a1f0c3e2-0004-4b6a-9c1d-000000000004",
+      "name": "Respond with Score",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        2160,
+        -120
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the Slack message for hot and warm leads.\n// Find your Hub ID in HubSpot (account menu, top right) and paste it below to get a working \"Open in HubSpot\" link.\nconst PORTAL_ID = 'YOUR_HUBSPOT_PORTAL_ID';\n\nconst l = $input.first().json;\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst name = esc(`${l.first_name} ${l.last_name}`.trim() || l.email);\nconst where = esc([l.job_title, l.company].filter(Boolean).join(' @ '));\nconst hasLink = l.hubspot?.contact_id && PORTAL_ID !== 'YOUR_HUBSPOT_PORTAL_ID';\nconst link = hasLink\n  ? `\\n<https://app.hubspot.com/contacts/${PORTAL_ID}/record/0-1/${l.hubspot.contact_id}|Open in HubSpot>`\n  : '';\n\nlet text = '';\nif (l.tier === 'hot') {\n  const reasons = (l.score_breakdown || []).map((r) => `• ${esc(r)}`).join('\\n');\n  const useCase = esc(l.use_case).slice(0, 300);\n  text =\n    `:fire: *HOT lead: ${name}*${where ? `, ${where}` : ''}\\n` +\n    `*Score:* ${l.score}/100 (fit ${l.fit_score}, intent ${l.intent_score})\\n` +\n    `*Use case:* ${useCase || 'not provided'}\\n` +\n    `*Why it scored this way:*\\n${reasons}` +\n    link;\n} else if (l.tier === 'warm') {\n  text =\n    `:sunny: Warm lead: *${name}*${where ? `, ${where}` : ''}. ` +\n    `Score ${l.score}/100.${link}`;\n}\nreturn [{ json: { ...l, slack_text: text } }];\n"
+      },
+      "id": "a3f0c3e2-0012-4b6a-9c1d-000000000012",
+      "name": "Format Slack Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        2160,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "a3f0c3e2-1001-4b6a-9c1d-000000000001",
+                    "leftValue": "={{ $json.tier }}",
+                    "rightValue": "hot",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "hot"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "id": "a3f0c3e2-1002-4b6a-9c1d-000000000002",
+                    "leftValue": "={{ $json.tier }}",
+                    "rightValue": "warm",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "warm"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "a3f0c3e2-0013-4b6a-9c1d-000000000013",
+      "name": "Route by Tier",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        2400,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "a3f0c3e2-0014-4b6a-9c1d-000000000014",
+      "name": "Slack: Hot Lead",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        2640,
+        20
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "a3f0c3e2-0015-4b6a-9c1d-000000000015",
+      "name": "Slack: Warm Lead",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        2640,
+        220
+      ]
+    }
+  ],
+  "connections": {
+    "Inbound Lead Webhook": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Validate",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Validate": {
+      "main": [
+        [
+          {
+            "node": "Score Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Score Lead": {
+      "main": [
+        [
+          {
+            "node": "Build HubSpot Properties",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build HubSpot Properties": {
+      "main": [
+        [
+          {
+            "node": "Valid Email?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Email?": {
+      "main": [
+        [
+          {
+            "node": "Search Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Contact": {
+      "main": [
+        [
+          {
+            "node": "Contact Exists?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Contact Exists?": {
+      "main": [
+        [
+          {
+            "node": "Update Contact",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Contact",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Contact": {
+      "main": [
+        [
+          {
+            "node": "Build Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Response": {
+      "main": [
+        [
+          {
+            "node": "Respond with Score",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Format Slack Message",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Slack Message": {
+      "main": [
+        [
+          {
+            "node": "Route by Tier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Tier": {
+      "main": [
+        [
+          {
+            "node": "Slack: Hot Lead",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Slack: Warm Lead",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "pinData": {},
+  "id": "p3SlackRouting001"
+}
