@@ -1,0 +1,352 @@
+{
+  "name": "Inbound Lead Engine - Phase 6 (Deals & Stalled Alerts)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 15
+            }
+          ]
+        }
+      },
+      "id": "9c21eb0e-753f-4240-bdb8-6f5adfaf8954",
+      "name": "Every 15 Minutes",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "7d4ae1d6-eadd-4437-9aa8-4e0d7726b32f",
+      "name": "Manual Run: Deals",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        0,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/contacts/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'lead_tier', operator: 'EQ', value: 'hot' }] }], properties: ['email','firstname','lastname','company','lead_score'], limit: 100 }) }}",
+        "options": {}
+      },
+      "id": "25716455-d70f-4f1d-90a7-d97a4899026a",
+      "name": "Find Hot Leads",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        64
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Turn each hot contact into a deal request. Edit the two constants if your pipeline differs.\n// Internal IDs: HubSpot Settings > Objects > Deals > Pipelines. Free default pipeline: 'default' / 'appointmentscheduled'.\nconst PIPELINE = 'default';\nconst STAGE = 'appointmentscheduled';\n\nconst contacts = $input.first().json.results ?? [];\nreturn contacts.map((c) => {\n  const p = c.properties || {};\n  const name = `${p.firstname ?? ''} ${p.lastname ?? ''}`.trim() || p.email || `Contact ${c.id}`;\n  // The deal name doubles as the dedupe key: one deal per lead.\n  const dealname = `${name}${p.company ? ' - ' + p.company : ''} (Inbound)`;\n  return { json: {\n    contact_id: c.id,\n    dealname,\n    search_body: {\n      filterGroups: [{ filters: [{ propertyName: 'dealname', operator: 'EQ', value: dealname }] }],\n      properties: ['dealname'],\n      limit: 1,\n    },\n    deal_body: {\n      properties: { dealname, pipeline: PIPELINE, dealstage: STAGE },\n      // 3 = deal-to-contact association (HubSpot defined)\n      associations: [{ to: { id: c.id }, types: [{ associationCategory: 'HUBSPOT_DEFINED', associationTypeId: 3 }] }],\n    },\n  } };\n});\n"
+      },
+      "id": "65993200-b315-4d7e-b76e-4c066cc918f8",
+      "name": "Prepare Deals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        64
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.deal_body) }}",
+        "options": {}
+      },
+      "id": "776acae1-655d-495e-bce6-c7d2a2deba82",
+      "name": "Create Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        1232,
+        64
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "e85d3bed-712c-4175-bfe0-f8b2297583ad",
+      "name": "Weekdays 9am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        0,
+        368
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ filterGroups: [{ filters: [{ propertyName: 'dealstage', operator: 'NOT_IN', values: ['closedwon', 'closedlost'] }] }], properties: ['dealname','dealstage','amount','createdate','hs_lastmodifieddate','notes_last_updated'], limit: 100 }) }}",
+        "options": {}
+      },
+      "id": "6708e298-e8c8-459e-a98d-7557a7126bd8",
+      "name": "Find Open Deals",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        272,
+        432
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Find open deals with no activity for STALL_DAYS or more and build one Slack message.\n// Set STALL_DAYS = 0 temporarily to test with fresh deals. Set ALWAYS_POST = true to also post \"all clear\".\nconst STALL_DAYS = 0;\nconst ALWAYS_POST = false;\nconst PORTAL_ID = '149491548';\nconst MAX_LINES = 15;\nconst STAGES = {\n  appointmentscheduled: 'Appointment Scheduled', qualifiedtobuy: 'Qualified To Buy',\n  presentationscheduled: 'Presentation Scheduled', decisionmakerboughtin: 'Decision Maker Bought-In',\n  contractsent: 'Contract Sent',\n};\n\nconst esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');\nconst toMs = (t) => (t == null || t === '' ? NaN : /^\\d+$/.test(String(t)) ? Number(t) : Date.parse(t));\nconst now = Date.now();\nconst open = ($input.first().json.results ?? []).map((d) => {\n  const p = d.properties || {};\n  // Last touch = the most recent of creation, last modification and last logged activity.\n  const last = Math.max(...[p.createdate, p.hs_lastmodifieddate, p.notes_last_updated].map(toMs).filter(Number.isFinite));\n  return { id: d.id, name: p.dealname || '(unnamed deal)', stage: STAGES[p.dealstage] ?? p.dealstage ?? 'unknown', days: (now - last) / 86400000 };\n}).filter((d) => Number.isFinite(d.days));\n\nconst stalled = open.filter((d) => d.days >= STALL_DAYS).sort((a, b) => b.days - a.days);\nif (!stalled.length && !ALWAYS_POST) return [];\n\nconst link = (d) => (PORTAL_ID !== 'YOUR_HUBSPOT_PORTAL_ID'\n  ? ` <https://app.hubspot.com/contacts/${PORTAL_ID}/record/0-3/${d.id}|Open>` : '');\nlet text;\nif (!stalled.length) {\n  text = `:white_check_mark: No stalled deals. ${open.length} open deals, all active in the last ${STALL_DAYS} days.`;\n} else {\n  const lines = stalled.slice(0, MAX_LINES).map((d) =>\n    `• *${esc(d.name)}*, ${esc(d.stage)}, ${Math.floor(d.days)} days without activity.${link(d)}`);\n  const more = stalled.length > MAX_LINES ? `\\n_...and ${stalled.length - MAX_LINES} more._` : '';\n  text = `:hourglass_flowing_sand: *Stalled deals:* ${stalled.length} of ${open.length} open deals have had no activity for ${STALL_DAYS}+ days\\n${lines.join('\\n')}${more}`;\n}\nreturn [{ json: { stalled_count: stalled.length, open_count: open.length, slack_text: text } }];\n"
+      },
+      "id": "b75df763-5d2d-4607-9742-0e03682eadce",
+      "name": "Find Stalled Deals",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        512,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "select": "channel",
+        "channelId": {
+          "__rl": true,
+          "value": "C0CABDF77K7",
+          "mode": "list",
+          "cachedResultName": "stalled-deals"
+        },
+        "text": "={{ $json.slack_text }}",
+        "otherOptions": {
+          "includeLinkToWorkflow": false
+        }
+      },
+      "id": "3a40cc8f-27cc-4b8f-b5f2-5c6e934a543d",
+      "name": "Slack: Stalled Deals",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.3,
+      "position": [
+        752,
+        432
+      ],
+      "webhookId": "50822280-55d9-4cac-ac90-33174efaac4c",
+      "credentials": {
+        "slackApi": {
+          "id": "uNUXOqcWUiABrYoF",
+          "name": "Slack account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "   // Keep only leads that do not have a deal yet. If a lookup result is missing, play safe and skip.\n   const prep = $('Prepare Deals').all();\n   const res = $input.all();\n   return prep\n     .filter((p, i) => Number(res[i]?.json?.total ?? 1) === 0)\n     .map((p) => ({ json: p.json }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        976,
+        64
+      ],
+      "id": "ab97e509-4d73-42e6-87eb-c4835de6aa4e",
+      "name": "Pick New Deals"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.hubapi.com/crm/v3/objects/deals/search",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.search_body) }}",
+        "options": {
+          "batching": {
+            "batch": {
+              "batchSize": 1,
+              "batchInterval": 500
+            }
+          }
+        }
+      },
+      "id": "bffcfeec-e53d-49ae-b4e4-bab00a163253",
+      "name": "Find Existing Deal",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        752,
+        64
+      ],
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "fDmY4cPALlqz4IaX",
+          "name": "Header Auth account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Every 15 Minutes": {
+      "main": [
+        [
+          {
+            "node": "Find Hot Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Run: Deals": {
+      "main": [
+        [
+          {
+            "node": "Find Hot Leads",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Hot Leads": {
+      "main": [
+        [
+          {
+            "node": "Prepare Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Prepare Deals": {
+      "main": [
+        [
+          {
+            "node": "Find Existing Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Weekdays 9am": {
+      "main": [
+        [
+          {
+            "node": "Find Open Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Open Deals": {
+      "main": [
+        [
+          {
+            "node": "Find Stalled Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Stalled Deals": {
+      "main": [
+        [
+          {
+            "node": "Slack: Stalled Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pick New Deals": {
+      "main": [
+        [
+          {
+            "node": "Create Deal",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Find Existing Deal": {
+      "main": [
+        [
+          {
+            "node": "Pick New Deals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": true
+  },
+  "versionId": "89f8e2b3-44d7-4d86-a3ea-6b8aa6e21a57",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "89a948a4c107fa51e58435967ab0503e5a14261df1508043aff8bd085b8d140c"
+  },
+  "nodeGroups": [],
+  "id": "080zKvoD8MdvaB0M",
+  "tags": []
+}
